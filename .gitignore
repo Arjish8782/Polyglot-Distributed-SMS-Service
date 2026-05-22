@@ -1,0 +1,34 @@
+# --- Build & Compiled Files ---
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# Go
+bin/
+main
+*.exe
+*.test
+
+# --- IDE & Editor Settings ---
+.vscode/
+.idea/
+.settings/
+.project
+.classpath
+
+# --- Docker & Environment ---
+# Don't push local build caches
+*.dockerignore
+# Local environment variables (if you ever use them)
+.env
+.env.local
+
+# --- OS Metadata ---
+.DS_Store
+Thumbs.db
+
+# --- Logs ---
+*.log

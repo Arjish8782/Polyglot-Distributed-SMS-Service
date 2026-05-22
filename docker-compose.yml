@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # 1. The Cache
+  redis:
+    image: redis:latest
+    container_name: redis
+    ports:
+      - "6379:6379"
+
+  # 2. The Database
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+
+  # 3. The Message Broker (Requires Zookeeper)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # Automatically create our topic when Kafka starts!
+      KAFKA_CREATE_TOPICS: "sms_events:1:1" 
+
+  # 4. Your Java Gateway API
+  java-api:
+    build: 
+      context: ./sms-sender  # Change this to your exact Java folder name!
+    container_name: java-api
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redis
+      - kafka
+
+  # 5. Your Go Microservice Worker
+  go-store:
+    build: 
+      context: ./sms-store # Change this to your exact Go folder name!
+    container_name: go-store
+    ports:
+      - "8081:8081"
+    depends_on:
+      - mongodb
+      - kafka
