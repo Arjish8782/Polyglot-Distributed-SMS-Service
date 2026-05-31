@@ -27,13 +27,16 @@ func InitDB() {
 }
 
 // SaveSMS takes the record from Kafka and inserts it into the database
-func SaveSMS(record models.SMSRecord) {
-	_, err := collection.InsertOne(context.Background(), record)
-	if err != nil {
-		log.Printf("Error saving to MongoDB: %v", err)
-	} else {
-		fmt.Println("💾 Successfully saved SMS to database!")
-	}
+// SaveSMS takes the record from Kafka and inserts it into the database
+func SaveSMS(record models.SMSRecord) error {
+	// We deleted the line trying to use "client".
+	// We just use the global "collection" variable initialized by InitDB!
+	
+	// Attempt the insert
+	_, err := collection.InsertOne(context.TODO(), record)
+	
+	// Return the error
+	return err 
 }
 
 // GetSMSHistory fetches all messages for a specific phone number

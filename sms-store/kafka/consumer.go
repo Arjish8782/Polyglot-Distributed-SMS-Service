@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sms-store/models"
@@ -10,38 +11,34 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-// 1. THE INTERFACE
+// ⚡ Create a specific error just for bad JSON data
+var ErrInvalidJSON = errors.New("invalid json format")
+
 type SMSWriter interface {
 	SaveSMS(record models.SMSRecord) error
 }
 
-// 2. THE STRUCT
 type Consumer struct {
 	DB SMSWriter
 }
 
-// 3. THE TESTABLE HELPER METHOD (This is what the test was looking for!)
-// We separated the JSON parsing and database saving so we can test it without Kafka
 func (c *Consumer) ProcessMessage(msgValue []byte) error {
 	var smsRecord models.SMSRecord
 	err := json.Unmarshal(msgValue, &smsRecord)
 	if err != nil {
-		return err // Return an error if JSON is bad
+		return ErrInvalidJSON // Return our specific Poison Pill error
 	}
 
-	// Save using our injected interface!
-	return c.DB.SaveSMS(smsRecord)
+	return c.DB.SaveSMS(smsRecord) // Return the DB error (if any)
 }
 
-// 4. THE MAIN LOOP
 func (c *Consumer) Start() {
-	// Re-initialize the Kafka Reader
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:  []string{"kafka:9092"}, // Make sure this matches your Kafka broker!
-		Topic:    "sms_events",                // Make sure this matches your Java producer!
+		Brokers:  []string{"kafka:9092"}, 
+		Topic:    "sms_events",                
 		GroupID:  "sms_consumer_group",
-		MinBytes: 10e3, // 10KB
-		MaxBytes: 10e6, // 10MB
+		MinBytes: 10e3,
+		MaxBytes: 10e6,
 	})
 	
 	defer reader.Close()
@@ -49,18 +46,22 @@ func (c *Consumer) Start() {
 	fmt.Println("🎧 Kafka Consumer started, listening for messages...")
 
 	for {
-		// Read the raw message from Kafka
 		msg, err := reader.ReadMessage(context.Background())
 		if err != nil {
 			log.Printf("❌ Error reading message: %v\n", err)
 			continue
 		}
 
-		// ⚡ Pass the raw JSON to our helper method!
 		err = c.ProcessMessage(msg.Value)
 		if err != nil {
-			log.Printf("❌ Failed to process message: %v\n", err)
-			continue
+			// 1. POISON PILL CHECK: Is it just bad data?
+			if err == ErrInvalidJSON {
+				log.Printf("⚠️ POISON PILL: Bad data received, skipping. Data: %s\n", string(msg.Value))
+				continue // Move on to the next message
+			}
+
+			// 2. INFRASTRUCTURE FAILURE: It's a DB error! Crash the consumer!
+			log.Fatalf("🚨 CRITICAL: Database failure! Crashing consumer to preserve Kafka offset. Error: %v\n", err)
 		}
 
 		fmt.Printf("✅ Successfully processed and saved SMS\n")
