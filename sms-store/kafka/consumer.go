@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time" // ⚡ ADDED: Needed for our pause/sleep timer
 	"sms-store/models"
 
 	"github.com/segmentio/kafka-go"
 )
 
-// ⚡ Create a specific error just for bad JSON data
 var ErrInvalidJSON = errors.New("invalid json format")
 
 type SMSWriter interface {
@@ -26,10 +26,9 @@ func (c *Consumer) ProcessMessage(msgValue []byte) error {
 	var smsRecord models.SMSRecord
 	err := json.Unmarshal(msgValue, &smsRecord)
 	if err != nil {
-		return ErrInvalidJSON // Return our specific Poison Pill error
+		return ErrInvalidJSON 
 	}
-
-	return c.DB.SaveSMS(smsRecord) // Return the DB error (if any)
+	return c.DB.SaveSMS(smsRecord) 
 }
 
 func (c *Consumer) Start() {
@@ -46,24 +45,49 @@ func (c *Consumer) Start() {
 	fmt.Println("🎧 Kafka Consumer started, listening for messages...")
 
 	for {
-		msg, err := reader.ReadMessage(context.Background())
+		msg, err := reader.FetchMessage(context.Background())
 		if err != nil {
-			log.Printf("❌ Error reading message: %v\n", err)
+			log.Printf("❌ Error fetching message: %v\n", err)
 			continue
 		}
 
 		err = c.ProcessMessage(msg.Value)
+		
+		// ⚡ THE NEW CIRCUIT BREAKER LOGIC
 		if err != nil {
-			// 1. POISON PILL CHECK: Is it just bad data?
 			if err == ErrInvalidJSON {
 				log.Printf("⚠️ POISON PILL: Bad data received, skipping. Data: %s\n", string(msg.Value))
-				continue // Move on to the next message
+				reader.CommitMessages(context.Background(), msg)
+				continue 
 			}
 
-			// 2. INFRASTRUCTURE FAILURE: It's a DB error! Crash the consumer!
-			log.Fatalf("🚨 CRITICAL: Database failure! Crashing consumer to preserve Kafka offset. Error: %v\n", err)
+			// INFRASTRUCTURE FAILURE: Do NOT crash! 
+			// Instead, enter a waiting loop until the DB comes back.
+			log.Printf("🚨 DATABASE DOWN! Pausing Kafka consumption. Error: %v\n", err)
+			
+			for {
+				log.Printf("⏳ Waiting 5 seconds before retrying...")
+				time.Sleep(5 * time.Second) // Pause execution for 5 seconds
+				
+				// Try to save the exact same message again
+				retryErr := c.ProcessMessage(msg.Value)
+				
+				if retryErr == nil {
+					log.Printf("🔌 DATABASE RECONNECTED! Message successfully saved.")
+					break // Break out of the infinite retry loop and continue normal operation!
+				}
+				
+				log.Printf("❌ Database still down. Retrying again...")
+			}
 		}
 
-		fmt.Printf("✅ Successfully processed and saved SMS\n")
+		// Manual Commit on Success (This runs after the first success, OR after the retry loop finishes)
+		err = reader.CommitMessages(context.Background(), msg)
+		if err != nil {
+			log.Printf("❌ Failed to commit offset to Kafka: %v\n", err)
+			continue
+		}
+
+		fmt.Printf("✅ Successfully processed, saved to DB, and committed to Kafka\n")
 	}
 }
