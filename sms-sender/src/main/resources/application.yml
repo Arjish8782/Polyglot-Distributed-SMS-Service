@@ -1,14 +1,13 @@
 server:
-  port: 8080 # The port your Java API will run on
+  port: ${SERVER_PORT:8080}
 
 spring:
   data:
     redis:
-      host: redis
-      port: 6379 # Matches the port in our docker-compose.yml
-  
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+
   kafka:
-    bootstrap-servers: kafka:9092 # Matches the Kafka port
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:kafka:9092}
     producer:
-      # We use JsonSerializer so Kafka knows to send our data as JSON
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer

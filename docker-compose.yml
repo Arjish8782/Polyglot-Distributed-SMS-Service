@@ -1,21 +1,27 @@
 version: '3.8'
 
 services:
-  # 1. The Cache
   redis:
-    image: redis:latest
+    image: redis:7.2.4-alpine
     container_name: redis
-    ports:
-      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
-  # 2. The Database
   mongodb:
-    image: mongo:latest
+    image: mongo:7.0.5
     container_name: mongodb
-    ports:
-      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: smsuser
+      MONGO_INITDB_ROOT_PASSWORD: smspassword
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--quiet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  # 3. The Message Broker (Requires Zookeeper)
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
     container_name: zookeeper
@@ -34,27 +40,40 @@ services:
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      # Automatically create our topic when Kafka starts!
-      KAFKA_CREATE_TOPICS: "sms_events:1:1" 
+      KAFKA_CREATE_TOPICS: "sms_events:1:1"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
-  # 4. Your Java Gateway API
   java-api:
-    build: 
-      context: ./sms-sender  # Change this to your exact Java folder name!
+    build:
+      context: ./sms-sender
     container_name: java-api
     ports:
       - "8080:8080"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
-      - redis
-      - kafka
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
 
-  # 5. Your Go Microservice Worker
   go-store:
-    build: 
-      context: ./sms-store # Change this to your exact Go folder name!
+    build:
+      context: ./sms-store
     container_name: go-store
     ports:
       - "8081:8081"
+    environment:
+      MONGO_URI: "mongodb://smsuser:smspassword@mongodb:27017"
+      KAFKA_BROKERS: kafka:9092
     depends_on:
-      - mongodb
-      - kafka
+      mongodb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy

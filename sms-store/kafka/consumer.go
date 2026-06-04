@@ -4,90 +4,129 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
-	"time" // ⚡ ADDED: Needed for our pause/sleep timer
+	"math/rand"
+	"os"
 	"sms-store/models"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 )
 
 var ErrInvalidJSON = errors.New("invalid json format")
 
+// MessageReader abstracts kafka.Reader so Start() can be tested without a real broker.
+type MessageReader interface {
+	FetchMessage(ctx context.Context) (kafka.Message, error)
+	CommitMessages(ctx context.Context, msgs ...kafka.Message) error
+	Close() error
+}
+
 type SMSWriter interface {
 	SaveSMS(record models.SMSRecord) error
 }
 
 type Consumer struct {
-	DB SMSWriter
+	DB     SMSWriter
+	Reader MessageReader // injected in tests; nil → Start() creates the real kafka.Reader
+}
+
+// backoffDuration returns an exponentially increasing delay with ±25% jitter, capped at 60s.
+func backoffDuration(attempt int) time.Duration {
+	base := time.Second * (1 << attempt) // 1s, 2s, 4s, 8s, ...
+	if base > 60*time.Second {
+		base = 60 * time.Second
+	}
+	jitter := time.Duration(rand.Int63n(int64(base) / 2))
+	return base + jitter - base/4
 }
 
 func (c *Consumer) ProcessMessage(msgValue []byte) error {
 	var smsRecord models.SMSRecord
-	err := json.Unmarshal(msgValue, &smsRecord)
-	if err != nil {
-		return ErrInvalidJSON 
+	if err := json.Unmarshal(msgValue, &smsRecord); err != nil {
+		return ErrInvalidJSON
 	}
-	return c.DB.SaveSMS(smsRecord) 
+	// FAILED vendor events stay in Kafka as audit trail but are not persisted to MongoDB
+	if smsRecord.Status == "FAILED" {
+		log.Printf("Skipping FAILED event for %s", smsRecord.PhoneNumber)
+		return nil
+	}
+	return c.DB.SaveSMS(smsRecord)
 }
 
-func (c *Consumer) Start() {
-	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:  []string{"kafka:9092"}, 
-		Topic:    "sms_events",                
-		GroupID:  "sms_consumer_group",
-		MinBytes: 10e3,
-		MaxBytes: 10e6,
-	})
-	
+func (c *Consumer) Start(ctx context.Context) {
+	reader := c.Reader
+	if reader == nil {
+		brokers := os.Getenv("KAFKA_BROKERS")
+		if brokers == "" {
+			brokers = "kafka:9092"
+		}
+		reader = kafka.NewReader(kafka.ReaderConfig{
+			Brokers:  []string{brokers},
+			Topic:    "sms_events",
+			GroupID:  "sms_consumer_group",
+			MinBytes: 10e3,
+			MaxBytes: 10e6,
+		})
+	}
 	defer reader.Close()
 
-	fmt.Println("🎧 Kafka Consumer started, listening for messages...")
+	log.Println("Kafka Consumer started, listening for messages...")
 
+	fetchErrCount := 0
 	for {
-		msg, err := reader.FetchMessage(context.Background())
+		msg, err := reader.FetchMessage(ctx)
 		if err != nil {
-			log.Printf("❌ Error fetching message: %v\n", err)
+			// Context cancelled = intentional shutdown, exit cleanly
+			if ctx.Err() != nil {
+				log.Println("Consumer shutting down")
+				return
+			}
+			fetchErrCount++
+			sleep := backoffDuration(fetchErrCount - 1)
+			log.Printf("Error fetching message (attempt %d): %v. Retrying in %v", fetchErrCount, err, sleep)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(sleep):
+			}
 			continue
 		}
+		fetchErrCount = 0
 
 		err = c.ProcessMessage(msg.Value)
-		
-		// ⚡ THE NEW CIRCUIT BREAKER LOGIC
 		if err != nil {
-			if err == ErrInvalidJSON {
-				log.Printf("⚠️ POISON PILL: Bad data received, skipping. Data: %s\n", string(msg.Value))
-				reader.CommitMessages(context.Background(), msg)
-				continue 
+			if errors.Is(err, ErrInvalidJSON) {
+				log.Printf("POISON PILL: Bad data, skipping. Data: %s", string(msg.Value))
+				reader.CommitMessages(ctx, msg)
+				continue
 			}
 
-			// INFRASTRUCTURE FAILURE: Do NOT crash! 
-			// Instead, enter a waiting loop until the DB comes back.
-			log.Printf("🚨 DATABASE DOWN! Pausing Kafka consumption. Error: %v\n", err)
-			
-			for {
-				log.Printf("⏳ Waiting 5 seconds before retrying...")
-				time.Sleep(5 * time.Second) // Pause execution for 5 seconds
-				
-				// Try to save the exact same message again
-				retryErr := c.ProcessMessage(msg.Value)
-				
-				if retryErr == nil {
-					log.Printf("🔌 DATABASE RECONNECTED! Message successfully saved.")
-					break // Break out of the infinite retry loop and continue normal operation!
+			// Infrastructure failure — retry with backoff until DB recovers
+			log.Printf("DATABASE ERROR: %v. Pausing consumption.", err)
+			for attempt := 0; ; attempt++ {
+				sleep := backoffDuration(attempt)
+				log.Printf("Retrying in %v (attempt %d)...", sleep, attempt+1)
+				select {
+				case <-ctx.Done():
+					log.Println("Consumer shutting down during DB retry")
+					return
+				case <-time.After(sleep):
 				}
-				
-				log.Printf("❌ Database still down. Retrying again...")
+				if retryErr := c.ProcessMessage(msg.Value); retryErr == nil {
+					log.Printf("DATABASE RECONNECTED after %d retries.", attempt+1)
+					break
+				}
 			}
 		}
 
-		// Manual Commit on Success (This runs after the first success, OR after the retry loop finishes)
-		err = reader.CommitMessages(context.Background(), msg)
-		if err != nil {
-			log.Printf("❌ Failed to commit offset to Kafka: %v\n", err)
+		if err = reader.CommitMessages(ctx, msg); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("Failed to commit offset: %v", err)
 			continue
 		}
-
-		fmt.Printf("✅ Successfully processed, saved to DB, and committed to Kafka\n")
+		log.Printf("Message processed and committed to Kafka")
 	}
 }

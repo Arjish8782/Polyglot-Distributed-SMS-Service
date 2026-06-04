@@ -4,58 +4,96 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sms-store/models"
+	"time"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/bson"
 )
 
 var collection *mongo.Collection
 
-// InitDB connects to MongoDB when the application starts
 func InitDB() {
-	clientOptions := options.Client().ApplyURI("mongodb://mongodb:27017")
-	client, err := mongo.Connect(context.Background(), clientOptions)
-	if err != nil {
-		log.Fatal(err)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	uri := os.Getenv("MONGO_URI")
+	if uri == "" {
+		uri = "mongodb://mongodb:27017"
 	}
 
-	// We create a database named "smsdb" and a collection named "messages"
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
+	if err != nil {
+		log.Fatalf("Failed to create MongoDB client: %v", err)
+	}
+
+	// Ping verifies actual network connectivity, not just client creation
+	if err = client.Ping(ctx, nil); err != nil {
+		log.Fatalf("Failed to connect to MongoDB (ping failed): %v", err)
+	}
+
 	collection = client.Database("smsdb").Collection("messages")
+
+	// Create compound index on (phoneNumber ASC, createdAt DESC) for fast paginated queries
+	indexModel := mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "phoneNumber", Value: 1},
+			{Key: "createdAt", Value: -1},
+		},
+		Options: options.Index().SetName("phoneNumber_createdAt_idx"),
+	}
+	if _, err = collection.Indexes().CreateOne(ctx, indexModel); err != nil {
+		log.Fatalf("Failed to create MongoDB index: %v", err)
+	}
+
+	log.Println("Connected to MongoDB")
 	fmt.Println("🍃 Connected to MongoDB!")
 }
 
-// SaveSMS takes the record from Kafka and inserts it into the database
-// SaveSMS takes the record from Kafka and inserts it into the database
 func SaveSMS(record models.SMSRecord) error {
-	// We deleted the line trying to use "client".
-	// We just use the global "collection" variable initialized by InitDB!
-	
-	// Attempt the insert
-	_, err := collection.InsertOne(context.TODO(), record)
-	
-	// Return the error
-	return err 
+	if collection == nil {
+		return fmt.Errorf("database not initialized")
+	}
+	record.CreatedAt = time.Now().UTC()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := collection.InsertOne(ctx, record)
+	return err
 }
 
-// GetSMSHistory fetches all messages for a specific phone number
-func GetSMSHistory(phoneNumber string) ([]models.SMSRecord, error) {
-	// 1. Create the filter: match documents where the "phoneNumber" field equals our target
-	filter := bson.M{"phoneNumber": phoneNumber}
+func GetSMSHistory(phoneNumber string, page, limit int) ([]models.SMSRecord, error) {
+	if collection == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	if page <= 0 {
+		page = 1
+	}
 
-	// 2. Execute the search
-	cursor, err := collection.Find(context.Background(), filter)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	skip := int64((page - 1) * limit)
+	opts := options.Find().
+		SetSkip(skip).
+		SetLimit(int64(limit)).
+		SetSort(bson.D{{Key: "createdAt", Value: -1}})
+
+	cursor, err := collection.Find(ctx, bson.M{"phoneNumber": phoneNumber}, opts)
 	if err != nil {
 		return nil, err
 	}
 	defer cursor.Close(context.Background())
 
-	// 3. Decode the results into a slice (Go's version of a list/array)
 	var messages []models.SMSRecord
-	if err = cursor.All(context.Background(), &messages); err != nil {
+	if err = cursor.All(ctx, &messages); err != nil {
 		return nil, err
 	}
-
 	return messages, nil
 }

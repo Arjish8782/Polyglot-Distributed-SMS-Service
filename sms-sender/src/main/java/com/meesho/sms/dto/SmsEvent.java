@@ -6,7 +6,9 @@ import lombok.Data;
 @Data
 @AllArgsConstructor
 public class SmsEvent {
+    private String requestId;
     private String phoneNumber;
     private String message;
-    private String status; // Will hold "SUCCESS" or "FAILED"
+    private String status;
+    private String timestamp;
 }

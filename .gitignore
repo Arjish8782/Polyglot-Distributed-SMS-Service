@@ -13,6 +13,7 @@ sms-store/main
 bin/
 *.exe
 *.test
+*.out
 
 # --- IDE & editor ---
 .vscode/

@@ -1,40 +1,82 @@
 package main
 
 import (
-	"fmt"
+	"context"
+	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"sms-store/database"
 	"sms-store/handlers"
 	"sms-store/kafka"
 	"sms-store/models"
+	"syscall"
+	"time"
 )
 
 type RealMongoDatabase struct{}
 
-func (r *RealMongoDatabase) GetSMSHistory(userID string) ([]models.SMSRecord, error) {
-	return database.GetSMSHistory(userID)
+func (r *RealMongoDatabase) GetSMSHistory(userID string, page, limit int) ([]models.SMSRecord, error) {
+	return database.GetSMSHistory(userID, page, limit)
 }
 
-// ⚡ THE FIX: Actually return the error from MongoDB instead of hardcoding nil!
-// (Note: Make sure your database.SaveSMS function is set up to return an error)
 func (r *RealMongoDatabase) SaveSMS(record models.SMSRecord) error {
-	return database.SaveSMS(record) 
+	return database.SaveSMS(record)
 }
 
 func main() {
 	database.InitDB()
 
+	// Root context: cancelled on SIGTERM or Ctrl-C
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer cancel()
+
 	realDB := &RealMongoDatabase{}
-
 	messageConsumer := &kafka.Consumer{DB: realDB}
-	go messageConsumer.Start()
 
+	// Supervised consumer goroutine: recovers from panics and restarts until shutdown
+	go func() {
+		for {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("PANIC in consumer goroutine: %v. Restarting...", r)
+					}
+				}()
+				messageConsumer.Start(ctx)
+			}()
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}()
+
+	mux := http.NewServeMux()
 	server := &handlers.Server{DB: realDB}
-	http.HandleFunc("/v1/user/{User_id}/messages", server.GetMessagesHandler)
+	mux.HandleFunc("/v1/user/{User_id}/messages", server.GetMessagesHandler)
 
-	fmt.Println("🚀 SMS Store Web Server running on http://localhost:8081...")
-	err := http.ListenAndServe(":8081", nil)
-	if err != nil {
-		fmt.Printf("Server failed: %v\n", err)
+	httpServer := &http.Server{
+		Addr:    ":8081",
+		Handler: mux,
 	}
+
+	go func() {
+		log.Println("SMS Store running on :8081")
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("Shutdown signal received")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+	log.Println("Shutdown complete")
 }

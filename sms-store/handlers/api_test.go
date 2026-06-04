@@ -1,48 +1,81 @@
 package handlers
 
 import (
-    "net/http"
-    "net/http/httptest"
-    "testing"
-    "sms-store/models"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sms-store/models"
+	"testing"
 )
 
-// 1. Create a Fake Database Struct
-type MockDatabase struct {}
+type MockDatabase struct{}
 
-// 2. Make it satisfy the SMSStore Interface
-func (m *MockDatabase) GetSMSHistory(userID string) ([]models.SMSRecord, error) {
-    // We don't connect to Mongo! We just return hardcoded fake data.
-    fakeMessages := []models.SMSRecord{
-        {PhoneNumber: userID, Message: "Mocked Message", Status: "SUCCESS"},
-    }
-    return fakeMessages, nil
+func (m *MockDatabase) GetSMSHistory(userID string, page, limit int) ([]models.SMSRecord, error) {
+	fakeMessages := []models.SMSRecord{
+		{PhoneNumber: userID, Message: "Mocked Message", Status: "SUCCESS"},
+	}
+	return fakeMessages, nil
 }
 
-func TestGetMessagesHandler_WithoutDocker(t *testing.T) {
-    // 1. ARRANGE: Create our Fake Database and inject it into the Server
-    mockDB := &MockDatabase{}
-    server := &Server{DB: mockDB} // Dependency Injection!
+type MockFailingDatabase struct{}
 
-    req, err := http.NewRequest("GET", "/v1/user/9998887777/messages", nil)
-    if err != nil {
-        t.Fatal(err)
-    }
+func (m *MockFailingDatabase) GetSMSHistory(userID string, page, limit int) ([]models.SMSRecord, error) {
+	return nil, fmt.Errorf("simulated DB failure")
+}
 
-    rr := httptest.NewRecorder()
+func TestGetMessagesHandler_Success(t *testing.T) {
+	mockDB := &MockDatabase{}
+	server := &Server{DB: mockDB}
 
-    // 2. THE ROUTING TRICK
-    mux := http.NewServeMux()
-    // Notice we use server.GetMessagesHandler now
-    mux.HandleFunc("/v1/user/{User_id}/messages", server.GetMessagesHandler) 
+	req, err := http.NewRequest("GET", "/v1/user/9998887777/messages", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-    // 3. ACT
-    mux.ServeHTTP(rr, req)
+	rr := httptest.NewRecorder()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/user/{User_id}/messages", server.GetMessagesHandler)
+	mux.ServeHTTP(rr, req)
 
-    // 4. ASSERT
-    if status := rr.Code; status != http.StatusOK {
-        t.Errorf("Handler returned wrong status code: got %v want %v", status, http.StatusOK)
-    }
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("Expected 200, got %v", status)
+	}
+}
 
-    t.Logf("Successfully received Mocked JSON response: %s", rr.Body.String())
+func TestGetMessagesHandler_DBError(t *testing.T) {
+	mockDB := &MockFailingDatabase{}
+	server := &Server{DB: mockDB}
+
+	req, err := http.NewRequest("GET", "/v1/user/9998887777/messages", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/user/{User_id}/messages", server.GetMessagesHandler)
+	mux.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusInternalServerError {
+		t.Errorf("Expected 500, got %v", status)
+	}
+}
+
+func TestGetMessagesHandler_PaginationParams(t *testing.T) {
+	mockDB := &MockDatabase{}
+	server := &Server{DB: mockDB}
+
+	req, err := http.NewRequest("GET", "/v1/user/9998887777/messages?page=2&limit=5", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/user/{User_id}/messages", server.GetMessagesHandler)
+	mux.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("Expected 200 with pagination params, got %v", status)
+	}
 }
