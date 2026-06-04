@@ -1,33 +1,34 @@
 package handlers
 
 import (
-    "encoding/json"
-    "net/http"
-    "sms-store/models" // Import your models
+	"encoding/json"
+	"log"
+	"net/http"
+	"sms-store/models"
+	"strconv"
 )
 
-// 1. Define the Interface (The Contract)
-// Anything that has a GetSMSHistory method can be used as our database!
 type SMSStore interface {
-    GetSMSHistory(userID string) ([]models.SMSRecord, error)
+	GetSMSHistory(userID string, page, limit int) ([]models.SMSRecord, error)
 }
 
-// 2. Create a struct to hold our dependencies
 type Server struct {
-    DB SMSStore
+	DB SMSStore
 }
 
-// 3. Attach the handler as a method on the Server struct
 func (s *Server) GetMessagesHandler(w http.ResponseWriter, r *http.Request) {
-    userID := r.PathValue("User_id")
+	userID := r.PathValue("User_id")
 
-    // ⚡ Notice the change here! We use s.DB instead of the direct database package
-    messages, err := s.DB.GetSMSHistory(userID)
-    if err != nil {
-        http.Error(w, "Failed to fetch messages", http.StatusInternalServerError)
-        return
-    }
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 
-    w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(messages)
+	messages, err := s.DB.GetSMSHistory(userID, page, limit)
+	if err != nil {
+		log.Printf("ERROR: GetSMSHistory failed for user %s: %v", userID, err)
+		http.Error(w, "Failed to fetch messages", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(messages)
 }

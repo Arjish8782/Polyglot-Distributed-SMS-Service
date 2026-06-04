@@ -32,6 +32,19 @@ class GlobalExceptionHandlerTest {
     private SmsService smsService; // Dummy service
 
     @Test
+    void shouldReturnBadRequestWhenRequestIsInvalid() throws Exception {
+        // Send a request with a blank phoneNumber — triggers @NotBlank validation
+        String invalidRequest = "{\"phoneNumber\": \"\", \"message\": \"Hello\"}";
+
+        mockMvc.perform(post("/v1/sms/send")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(invalidRequest))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value("FAILED"))
+                .andExpect(jsonPath("$.error").value("Validation Failed"));
+    }
+
+    @Test
     void shouldReturnServiceUnavailableWhenRedisFails() throws Exception {
         // ARRANGE
         SmsRequest request = new SmsRequest("9998887777", "Hello");
@@ -47,6 +60,21 @@ class GlobalExceptionHandlerTest {
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(jsonPath("$.status").value("FAILED"))
                 .andExpect(jsonPath("$.error").value("Cache Service Unavailable"));
+    }
+
+    @Test
+    void shouldReturnInternalServerErrorForUnexpectedException() throws Exception {
+        SmsRequest request = new SmsRequest("9998887777", "Hello");
+        when(smsService.processSms(any(SmsRequest.class)))
+                .thenThrow(new RuntimeException("Unexpected NPE"));
+
+        mockMvc.perform(post("/v1/sms/send")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.status").value("FAILED"))
+                .andExpect(jsonPath("$.error").value("Internal Server Error"))
+                .andExpect(jsonPath("$.message").value("An unexpected error occurred."));
     }
 
     @Test
