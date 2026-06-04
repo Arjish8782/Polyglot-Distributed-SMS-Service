@@ -1,4 +1,5 @@
-# --- Build & Compiled Files ---
+# --- Build & compiled artifacts ---
+
 # Java / Maven
 target/
 *.class
@@ -6,27 +7,25 @@ target/
 *.war
 *.ear
 
-# Go
+# Go (sms-store builds with: go build -o main .)
+# Do not use bare "main" — it ignores Java's src/main/
+sms-store/main
 bin/
-main
 *.exe
 *.test
 
-# --- IDE & Editor Settings ---
+# --- IDE & editor ---
 .vscode/
 .idea/
 .settings/
 .project
 .classpath
 
-# --- Docker & Environment ---
-# Don't push local build caches
-*.dockerignore
-# Local environment variables (if you ever use them)
+# --- Environment & secrets ---
 .env
 .env.local
 
-# --- OS Metadata ---
+# --- OS metadata ---
 .DS_Store
 Thumbs.db
 
